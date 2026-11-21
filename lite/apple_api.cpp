@@ -403,7 +403,7 @@ static void copyPlaybackMetadata(const cJSON* assets, const std::string& adamId,
                                  cJSON* metadata) {
     if (!cJSON_IsArray(assets)) return;
 
-    static const char* names[] = {"xid", "gapless", "comments", "genreId"};
+    static const char* names[] = {"xid", "gapless", "comments"};
     for (const char* name : names) {
         const cJSON* found = nullptr;
         bool conflict = false;
@@ -415,7 +415,7 @@ static void copyPlaybackMetadata(const cJSON* assets, const std::string& adamId,
             const bool text = cJSON_IsString(value) && value->valuestring[0];
             const bool valid = strcmp(name, "gapless") == 0
                 ? (cJSON_IsBool(value) || cJSON_IsNumber(value) || text)
-                : (text || (strcmp(name, "genreId") == 0 && cJSON_IsNumber(value)));
+                : text;
             if (!valid) continue;
             if (found && !cJSON_Compare(found, value, true)) {
                 conflict = true;
