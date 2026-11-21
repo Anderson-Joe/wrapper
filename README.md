@@ -124,7 +124,7 @@ All responses use:
 | `/m3u8` | GET | `adamId` |
 | `/key` | GET | `adamId`, `uri` (required; the prefetch `skd://itunes.apple.com/P000000000/s1/e1` is rejected unless `adamId=0`) |
 | `/lyrics` | GET | `adamId`, optional `language`, optional `syllable` (`1`=word-timed syllable-lyrics with translations/romanization, `0`=line-timed lyrics converted in-wrapper **and still carrying translations/romanization as whole-line text**), optional `script` (transliteration script, default `en-Latn`) |
-| `/webplayback` | GET | `adamId`. Returns the playback URL and, when available, Apple's `xid` metadata. |
+| `/webplayback` | GET | `adamId`. Returns the playback URL and available Apple metadata: `xid`, `gapless`, `comments`, and `genreId`. |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
 
