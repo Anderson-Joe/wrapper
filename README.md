@@ -48,7 +48,7 @@ Build outputs:
 
 `wrapper-lite-qemu` is the recommended launcher. It boots the prebuilt guest
 (the `qemu/` assets) in QEMU and forwards the guest's HTTP service to the host,
-so no rooted device or native chroot is required. Prebuilt releases already
+so no rooted device or native chroot is required. [Prebuilt releases](https://github.com/Anderson-Joe/wrapper/releases/latest) already
 bundle QEMU plus its firmware in `qemu/bin/` for Linux, macOS, Windows and
 Android.
 
@@ -97,11 +97,11 @@ docker run --privileged -p 12340:12340 \
 Every push to `lite` publishes the image to GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/worldobservationlog/wrapper-lite:latest
+docker pull ghcr.io/anderson-joe/wrapper-lite:latest
 docker run --privileged -p 12340:12340 \
   -v ./rootfs/data:/app/rootfs/data \
   -e USERNAME=... -e PASSWORD=... \
-  ghcr.io/worldobservationlog/wrapper-lite:latest
+  ghcr.io/anderson-joe/wrapper-lite:latest
 ```
 
 Tags: `latest` and `lite` follow the `lite` branch, and `sha-<commit>` pins

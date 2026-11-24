@@ -3,6 +3,7 @@ name: build-lite
 on:
   push:
     branches: [ lite ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 env:
@@ -411,3 +412,42 @@ jobs:
       - name: Stop the guest
         if: always()
         run: pkill -f wrapper-lite-qemu || true
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-wrapper-lite-qemu, build-wrapper-lite-qemu-android, verify-qemu-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wrapper-lite-qemu-*
+          path: packages
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          for pkg in packages/*; do
+            name="${pkg##*/}"
+            if [[ "$name" == *windows* ]]; then
+              (cd "$pkg" && zip -qr "../../release-assets/$name.zip" .)
+            else
+              chmod +x "$pkg/wrapper-lite-qemu"
+              find "$pkg/qemu/bin" -type f -name 'qemu-system-*' -exec chmod +x {} +
+              tar -C "$pkg" -czf "release-assets/$name.tar.gz" .
+            fi
+          done
+          (cd release-assets && sha256sum *.zip *.tar.gz > checksums.txt)
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          body: |
+            ## 新功能
+            - `/webplayback` 提供可用的 XID、无缝播放标志和评论。
+
+            ## New features
+            - `/webplayback` exposes available XID, gapless, and comment fields.
