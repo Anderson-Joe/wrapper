@@ -82,6 +82,7 @@ struct CurlSlist {
 };
 
 /* ---- Apple API helpers ---- */
+struct cJSON;
 struct AppleApi {
     static std::string getDevToken();
     static std::string getLyrics(const std::string& adamId,
@@ -93,7 +94,8 @@ struct AppleApi {
                                   const std::string& musicToken);
     static std::string getWebPlayback(const std::string& adamId,
                                        const std::string& devToken,
-                                       const std::string& musicToken);
+                                       const std::string& musicToken,
+                                       cJSON* metadata = nullptr);
     static bool getLicense(const std::string& adamId,
                             const std::string& challenge,
                             const std::string& uri,

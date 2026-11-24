@@ -358,13 +358,14 @@ static void handle_webplayback(const httplib::Request& req, httplib::Response& r
         return;
     }
 
-    std::string m3u8 = AppleApi::getWebPlayback(adamId, tokens.dev_token, tokens.music_token);
+    cJSON* data = cJSON_CreateObject();
+    std::string m3u8 = AppleApi::getWebPlayback(adamId, tokens.dev_token, tokens.music_token, data);
     if (m3u8.empty()) {
+        cJSON_Delete(data);
         res.set_content(json_error(404, "webplayback not available"), "application/json");
         return;
     }
 
-    cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "adamId", adamId.c_str());
     cJSON_AddStringToObject(data, "m3u8", m3u8.c_str());
     res.set_content(json_success(data), "application/json");

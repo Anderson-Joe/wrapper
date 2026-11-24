@@ -392,9 +392,47 @@ std::string AppleApi::getLyrics(const std::string& adamId,
 }
 
 /* ---- WebPlayback ---- */
+static bool matchesPlaybackItem(const cJSON* metadata, const std::string& adamId) {
+    const cJSON* id = cJSON_GetObjectItemCaseSensitive(metadata, "itemId");
+    if (!id) return true;
+    if (cJSON_IsString(id)) return adamId == id->valuestring;
+    return cJSON_IsNumber(id) && adamId == strfmt("%.17g", id->valuedouble);
+}
+
+static void copyPlaybackMetadata(const cJSON* assets, const std::string& adamId,
+                                 cJSON* metadata) {
+    if (!cJSON_IsArray(assets)) return;
+
+    static const char* names[] = {"xid", "gapless", "comments"};
+    for (const char* name : names) {
+        const cJSON* found = nullptr;
+        bool conflict = false;
+        const cJSON* asset;
+        cJSON_ArrayForEach(asset, assets) {
+            const cJSON* assetMetadata = cJSON_GetObjectItemCaseSensitive(asset, "metadata");
+            if (!matchesPlaybackItem(assetMetadata, adamId)) continue;
+            const cJSON* value = cJSON_GetObjectItemCaseSensitive(assetMetadata, name);
+            const bool text = cJSON_IsString(value) && value->valuestring[0];
+            const bool valid = strcmp(name, "gapless") == 0
+                ? (cJSON_IsBool(value) || cJSON_IsNumber(value) || text)
+                : text;
+            if (!valid) continue;
+            if (found && !cJSON_Compare(found, value, true)) {
+                conflict = true;
+                break;
+            }
+            found = value;
+        }
+        if (found && !conflict) {
+            cJSON_AddItemToObject(metadata, name, cJSON_Duplicate(found, false));
+        }
+    }
+}
+
 std::string AppleApi::getWebPlayback(const std::string& adamId,
                                       const std::string& devToken,
-                                      const std::string& musicToken) {
+                                      const std::string& musicToken,
+                                      cJSON* metadata) {
     CurlEasy curl;
     if (!curl.ok) return "";
 
@@ -456,8 +494,9 @@ std::string AppleApi::getWebPlayback(const std::string& adamId,
         cJSON* hls = cJSON_GetObjectItemCaseSensitive(first, "hls-playlist-url");
         if (cJSON_IsString(hls)) m3u8 = hls->valuestring;
 
+        cJSON* assets = cJSON_GetObjectItemCaseSensitive(first, "assets");
+        if (metadata) copyPlaybackMetadata(assets, adamId, metadata);
         if (m3u8.empty()) {
-            cJSON* assets = cJSON_GetObjectItemCaseSensitive(first, "assets");
             if (cJSON_IsArray(assets)) {
                 int n = cJSON_GetArraySize(assets);
                 for (int i = 0; i < n; i++) {
