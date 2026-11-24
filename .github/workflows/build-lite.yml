@@ -5,6 +5,13 @@ on:
     branches: [ lite ]
     tags: [ 'v*' ]
   workflow_dispatch:
+    inputs:
+      artifact-run-id:
+        description: Existing workflow run containing release packages
+        type: string
+      release-tag:
+        description: Existing version tag for those packages
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -13,6 +20,7 @@ jobs:
   # The lite Dockerfile compiles wrapper-lite from source in its own build
   # stage, so this job is self-contained and runs alongside the others.
   build-docker-image:
+    if: inputs.artifact-run-id == ''
     name: Build and push Docker image (linux/amd64)
     runs-on: ubuntu-22.04
     permissions:
@@ -57,6 +65,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   build-wrapper-lite:
+    if: inputs.artifact-run-id == ''
     name: Build wrapper-lite (Linux)
     runs-on: ubuntu-22.04
     steps:
@@ -414,19 +423,43 @@ jobs:
         run: pkill -f wrapper-lite-qemu || true
 
   publish-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() &&
+      ((inputs.artifact-run-id != '' && inputs.release-tag != '') ||
+       (startsWith(github.ref, 'refs/tags/v') &&
+        needs.build-wrapper-lite-qemu.result == 'success' &&
+        needs.build-wrapper-lite-qemu-android.result == 'success' &&
+        needs.verify-qemu-package.result == 'success'))
     needs: [build-wrapper-lite-qemu, build-wrapper-lite-qemu-android, verify-qemu-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
+      - name: Confirm artifact run matches the release tag
+        if: inputs.artifact-run-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.artifact-run-id }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ && "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          built=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .head_sha)
+          tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          [[ "$built" == "$tagged" ]]
       - uses: actions/download-artifact@v8
         with:
           pattern: wrapper-lite-qemu-*
           path: packages
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact-run-id || github.run_id }}
       - name: Package release assets
         run: |
           set -euo pipefail
+          for platform in windows-x86_64 linux-x86_64 linux-aarch64 android-aarch64; do
+            test -f "packages/wrapper-lite-qemu-$platform/qemu/lite-initramfs.cpio.gz"
+          done
           mkdir release-assets
           for pkg in packages/*; do
             name="${pkg##*/}"
@@ -441,7 +474,7 @@ jobs:
           (cd release-assets && sha256sum *.zip *.tar.gz > checksums.txt)
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.release-tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           files: release-assets/*
           fail_on_unmatched_files: true
