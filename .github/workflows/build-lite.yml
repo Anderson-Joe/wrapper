@@ -2,7 +2,7 @@ name: build-lite
 
 on:
   push:
-    branches: [ lite, main ]
+    branches: [ lite ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
