@@ -391,6 +391,12 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
             const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
             if (cJSON_IsString(value)) cJSON_AddStringToObject(hit, field, value->valuestring);
         }
+        if (type == "albums") {
+            const cJSON* count = cJSON_GetObjectItemCaseSensitive(attrs, "trackCount");
+            if (cJSON_IsNumber(count) && count->valueint >= 0 && count->valuedouble == count->valueint) {
+                cJSON_AddNumberToObject(hit, "trackCount", count->valueint);
+            }
+        }
     }
     cJSON_Delete(root);
     res.set_content(json_success(data), "application/json");
