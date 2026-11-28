@@ -84,6 +84,11 @@ struct CurlSlist {
 /* ---- Apple API helpers ---- */
 struct cJSON;
 struct AppleApi {
+    static long searchCatalog(const std::string& region, const std::string& term,
+                              const std::string& type, int limit, int offset,
+                              const std::string& devToken, std::string& body);
+    static long getCatalogResponse(const std::string& path, const std::string& devToken,
+                                   std::string& body);
     static std::string getDevToken();
     static std::string getLyrics(const std::string& adamId,
                                   const std::string& region,

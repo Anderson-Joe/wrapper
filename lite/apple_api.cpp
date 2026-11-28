@@ -155,6 +155,25 @@ static bool performRequest(CurlEasy& curl) {
     return curl.perform();
 }
 
+long AppleApi::getCatalogResponse(const std::string& path, const std::string& devToken,
+                                  std::string& body) {
+    CurlEasy curl;
+    if (!curl.ok) return 0;
+
+    const std::string url = "https://amp-api.music.apple.com" + path;
+    CurlSlist headers;
+    headers.append(("Authorization: Bearer " + devToken).c_str());
+    headers.append("Origin: https://music.apple.com");
+    curl.setOptStr(CURLOPT_URL, url.c_str());
+    curl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
+    curl.setOptPtr(CURLOPT_WRITEDATA, &body);
+    curl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
+    curl.setOptPtr(CURLOPT_HTTPHEADER, headers.list);
+    apply_tls(curl);
+    if (!performRequest(curl)) return 0;
+    return curl.getResponseCode();
+}
+
 /* ---- Token management (base_dir-aware, atomic writes) ---- */
 void TokenCache::load() {
     std::string path = (base_dir.empty() ? "data" : base_dir) + "/token_cache.json";

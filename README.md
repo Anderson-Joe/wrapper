@@ -126,6 +126,7 @@ All responses use:
 | `/lyrics` | GET | `adamId`, optional `language`, optional `syllable` (`1`=word-timed syllable-lyrics with translations/romanization, `0`=line-timed lyrics converted in-wrapper **and still carrying translations/romanization as whole-line text**), optional `script` (transliteration script, default `en-Latn`) |
 | `/webplayback` | GET | `adamId`. Returns the playback URL and available Apple metadata: `xid`, `gapless`, and `comments`. |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
+| `/catalog/search` | GET | `term` and `type` (`songs` or `albums`), with optional `region` (defaults to the session storefront), `limit` (1–25, default 20), and `offset` (0–10000). Returns `region`, `items`, and `hasNext`. Uses the cached developer token internally. |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
 
 ## lite arguments

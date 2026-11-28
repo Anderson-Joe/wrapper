@@ -234,6 +234,95 @@ static std::string b64_encode(const uint8_t* data, size_t len) {
 /*     HTTP Handlers              */
 /* ============================== */
 
+static void handle_catalog_search(const httplib::Request& req, httplib::Response& res) {
+    const auto fail = [&](int status, const char* message) {
+        res.status = status;
+        res.set_content(json_error(status, message), "application/json");
+    };
+    const auto number = [&](const char* key, int fallback, int max) {
+        if (!req.has_param(key)) return fallback;
+        const auto value = req.get_param_value(key);
+        if (value.empty() || value.size() > 6 ||
+            value.find_first_not_of("0123456789") != std::string::npos) return -1;
+        const int result = std::atoi(value.c_str());
+        return result <= max ? result : -1;
+    };
+
+    const auto term = req.get_param_value("term");
+    const auto type = req.get_param_value("type");
+    const int limit = number("limit", 20, 25);
+    const int offset = number("offset", 0, 10000);
+    std::string region = req.get_param_value("region");
+    if (term.empty() || term.size() > 512 || term.find_first_not_of(" \t\r\n") == std::string::npos ||
+        (type != "songs" && type != "albums") || limit < 1 || offset < 0 ||
+        (req.has_param("region") && (region.size() != 2 ||
+         region.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos))) {
+        fail(400, "invalid catalog search parameters");
+        return;
+    }
+
+    std::string devToken;
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        if (!req.has_param("region")) region = normalize_storefront_id(g_tokens.storefront_id);
+        devToken = g_tokens.dev_token;
+    }
+    if (region.empty() || devToken.empty()) {
+        fail(503, "catalog session unavailable");
+        return;
+    }
+    std::transform(region.begin(), region.end(), region.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    std::string body;
+    const long status = AppleApi::searchCatalog(region, term, type, limit, offset, devToken, body);
+    if (status == 401 || status == 403) {
+        fail(502, "catalog authorization rejected");
+        return;
+    }
+    if (status == 429) {
+        fail(429, "catalog rate limit reached");
+        return;
+    }
+    if (status != 200) {
+        fail(502, "catalog request failed");
+        return;
+    }
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    const cJSON* results = cJSON_GetObjectItemCaseSensitive(root, "results");
+    const cJSON* group = cJSON_GetObjectItemCaseSensitive(results, type.c_str());
+    const cJSON* items = cJSON_GetObjectItemCaseSensitive(group, "data");
+    if (!cJSON_IsObject(results) || (group && !cJSON_IsArray(items))) {
+        cJSON_Delete(root);
+        fail(502, "invalid catalog response");
+        return;
+    }
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "region", region.c_str());
+    cJSON_AddBoolToObject(data, "hasNext",
+                          cJSON_IsString(cJSON_GetObjectItemCaseSensitive(group, "next")));
+    cJSON* hits = cJSON_AddArrayToObject(data, "items");
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, items) {
+        const cJSON* attrs = cJSON_GetObjectItemCaseSensitive(item, "attributes");
+        const cJSON* id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        const cJSON* name = cJSON_GetObjectItemCaseSensitive(attrs, "name");
+        if (!cJSON_IsString(id) || !cJSON_IsString(name)) continue;
+        cJSON* hit = cJSON_CreateObject();
+        cJSON_AddItemToArray(hits, hit);
+        cJSON_AddStringToObject(hit, "id", id->valuestring);
+        for (const char* field : {"name", "artistName", "albumName", "releaseDate", "url"}) {
+            const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+            if (cJSON_IsString(value)) cJSON_AddStringToObject(hit, field, value->valuestring);
+        }
+    }
+    cJSON_Delete(root);
+    res.set_content(json_success(data), "application/json");
+}
+
 static void handle_m3u8(const httplib::Request& req, httplib::Response& res) {
     auto adamId = req.get_param_value("adamId");
     if (adamId.empty()) {
@@ -695,6 +784,7 @@ int main(int argc, char* argv[]) {
         return httplib::Server::HandlerResponse::Unhandled;
     });
 
+    svr.Get("/catalog/search", handle_catalog_search);
     svr.Get("/m3u8", handle_m3u8);
     svr.Get("/key", handle_key);
     svr.Get("/lyrics", handle_lyrics);
