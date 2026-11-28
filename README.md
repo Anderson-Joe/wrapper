@@ -129,6 +129,8 @@ All responses use:
 | `/catalog/search` | GET | `term` and `type` (`songs` or `albums`), with optional `region` (defaults to the session storefront), `limit` (1–25, default 20), and `offset` (0–10000). Returns `region`, `items`, and `hasNext`. Uses the cached developer token internally. |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
 
+Catalog search uses the cached developer token and returns an empty list when no results match. It returns HTTP 400 for invalid parameters, 429 for upstream rate limiting, 502 for an upstream request or authorization failure, and 503 when the local catalog session is unavailable.
+
 ## lite arguments
 
 | Argument | Default | Description |
