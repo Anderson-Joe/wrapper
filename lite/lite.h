@@ -86,6 +86,7 @@ struct cJSON;
 struct AppleApi {
     static long searchCatalog(const std::string& region, const std::string& term,
                               const std::string& type, int limit, int offset,
+                              const std::string& language,
                               const std::string& devToken, std::string& body);
     static long getCatalogResponse(const std::string& path, const std::string& devToken,
                                    std::string& body);

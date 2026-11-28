@@ -422,7 +422,7 @@ static void copyPlaybackMetadata(const cJSON* assets, const std::string& adamId,
                                  cJSON* metadata) {
     if (!cJSON_IsArray(assets)) return;
 
-    static const char* names[] = {"xid", "gapless", "comments"};
+    static const char* names[] = {"xid", "gapless", "comments", "kind", "discCount", "playlistId"};
     for (const char* name : names) {
         const cJSON* found = nullptr;
         bool conflict = false;
@@ -430,11 +430,18 @@ static void copyPlaybackMetadata(const cJSON* assets, const std::string& adamId,
         cJSON_ArrayForEach(asset, assets) {
             const cJSON* assetMetadata = cJSON_GetObjectItemCaseSensitive(asset, "metadata");
             if (!matchesPlaybackItem(assetMetadata, adamId)) continue;
+            if (strcmp(name, "discCount") == 0 || strcmp(name, "playlistId") == 0) {
+                const cJSON* album = cJSON_GetObjectItemCaseSensitive(assetMetadata, "playlistId");
+                const cJSON* count = cJSON_GetObjectItemCaseSensitive(assetMetadata, "discCount");
+                if ((!cJSON_IsNumber(album) && !cJSON_IsString(album)) ||
+                    (!cJSON_IsNumber(count) && !cJSON_IsString(count))) continue;
+            }
             const cJSON* value = cJSON_GetObjectItemCaseSensitive(assetMetadata, name);
             const bool text = cJSON_IsString(value) && value->valuestring[0];
+            const bool number = cJSON_IsNumber(value);
             const bool valid = strcmp(name, "gapless") == 0
-                ? (cJSON_IsBool(value) || cJSON_IsNumber(value) || text)
-                : text;
+                ? (cJSON_IsBool(value) || number || text)
+                : (text || (number && (strcmp(name, "discCount") == 0 || strcmp(name, "playlistId") == 0)));
             if (!valid) continue;
             if (found && !cJSON_Compare(found, value, true)) {
                 conflict = true;

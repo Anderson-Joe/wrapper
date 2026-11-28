@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <map>
 #include <mutex>
 #include <chrono>
 #include <cctype>
@@ -234,6 +235,63 @@ static std::string b64_encode(const uint8_t* data, size_t len) {
 /*     HTTP Handlers              */
 /* ============================== */
 
+static bool valid_catalog_language(const std::string& language) {
+    return language.empty() || (language.size() <= 64 && language.front() != '-' &&
+        language.back() != '-' && language.find("--") == std::string::npos &&
+        language.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") ==
+            std::string::npos);
+}
+
+static int catalog_language_status(const std::string& region, const std::string& language,
+                                   const std::string& devToken) {
+    if (language.empty()) return 200;
+    using Clock = std::chrono::steady_clock;
+    struct StorefrontLanguages {
+        std::vector<std::string> tags;
+        Clock::time_point expires;
+    };
+    static std::mutex cacheMutex;
+    static std::map<std::string, StorefrontLanguages> cache;
+    const auto statusFor = [&](const std::vector<std::string>& tags) {
+        return std::find(tags.begin(), tags.end(), language) != tags.end() ? 200 : 400;
+    };
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        const auto entry = cache.find(region);
+        if (entry != cache.end() && entry->second.expires > Clock::now()) {
+            return statusFor(entry->second.tags);
+        }
+    }
+
+    std::string body;
+    const long status = AppleApi::getCatalogResponse("/v1/storefronts/" + region, devToken, body);
+    if (status != 200) return status == 429 ? 429 : 502;
+    cJSON* root = cJSON_Parse(body.c_str());
+    const auto* item = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(root, "data"), 0);
+    const auto* id = cJSON_GetObjectItemCaseSensitive(item, "id");
+    const auto* attrs = cJSON_GetObjectItemCaseSensitive(item, "attributes");
+    const auto* tags = cJSON_GetObjectItemCaseSensitive(attrs, "supportedLanguageTags");
+    StorefrontLanguages entry{{}, Clock::now() + std::chrono::hours(1)};
+    if (cJSON_IsString(id) && region == id->valuestring && cJSON_IsArray(tags)) {
+        const cJSON* tag = nullptr;
+        cJSON_ArrayForEach(tag, tags) {
+            if (cJSON_IsString(tag)) entry.tags.emplace_back(tag->valuestring);
+        }
+    }
+    cJSON_Delete(root);
+    if (entry.tags.empty()) return 502;
+    const int result = statusFor(entry.tags);
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cache[region] = std::move(entry);
+    return result;
+}
+
+static const char* catalog_language_error(int status) {
+    if (status == 400) return "invalid catalog language";
+    if (status == 429) return "catalog rate limit reached";
+    return "catalog storefront language lookup failed";
+}
+
 static void handle_catalog_search(const httplib::Request& req, httplib::Response& res) {
     const auto fail = [&](int status, const char* message) {
         res.status = status;
@@ -250,6 +308,11 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
 
     const auto term = req.get_param_value("term");
     const auto type = req.get_param_value("type");
+    const auto language = req.get_param_value("language");
+    if (!valid_catalog_language(language)) {
+        fail(400, "invalid catalog language");
+        return;
+    }
     const int limit = number("limit", 20, 25);
     const int offset = number("offset", 0, 10000);
     std::string region = req.get_param_value("region");
@@ -275,8 +338,17 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
         return static_cast<char>(std::tolower(ch));
     });
 
+    const int languageStatus = catalog_language_status(region, language, devToken);
+    if (languageStatus != 200) {
+        fail(languageStatus, catalog_language_error(languageStatus));
+        return;
+    }
     std::string body;
-    const long status = AppleApi::searchCatalog(region, term, type, limit, offset, devToken, body);
+    const long status = AppleApi::searchCatalog(region, term, type, limit, offset, language, devToken, body);
+    if (status == 400 && !language.empty()) {
+        fail(400, "invalid catalog language");
+        return;
+    }
     if (status == 401 || status == 403) {
         fail(502, "catalog authorization rejected");
         return;
@@ -302,6 +374,7 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "region", region.c_str());
+    if (!language.empty()) cJSON_AddStringToObject(data, "language", language.c_str());
     cJSON_AddBoolToObject(data, "hasNext",
                           cJSON_IsString(cJSON_GetObjectItemCaseSensitive(group, "next")));
     cJSON* hits = cJSON_AddArrayToObject(data, "items");
@@ -329,6 +402,11 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         res.set_content(json_error(status, message), "application/json");
     };
     const auto id = req.get_param_value("id");
+    const auto language = req.get_param_value("language");
+    if (!valid_catalog_language(language)) {
+        fail(400, "invalid catalog language");
+        return;
+    }
     auto region = req.get_param_value("region");
     const auto type = tracks ? std::string("albums") : req.get_param_value("type");
     const auto offset = req.has_param("offset") ? req.get_param_value("offset") : "0";
@@ -352,11 +430,28 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         fail(503, "catalog session unavailable");
         return;
     }
+    const int languageStatus = catalog_language_status(region, language, devToken);
+    if (languageStatus != 200) {
+        fail(languageStatus, catalog_language_error(languageStatus));
+        return;
+    }
     std::string path = "/v1/catalog/" + region + "/" + type + "/" + id;
     if (tracks) path += "/tracks?limit=25&offset=" + offset;
+    const bool metadata = req.get_param_value("metadata") == "1" && !tracks;
+    if (metadata) {
+        path += type == "songs" ? "?include=albums,artists,composers,credits,genres" : "?include=artists";
+    }
+    if (!language.empty()) {
+        path += tracks || metadata ? "&l=" : "?l=";
+        path += language;
+    }
 
     std::string body;
     const long status = AppleApi::getCatalogResponse(path, devToken, body);
+    if (status == 400 && !language.empty()) {
+        fail(400, "invalid catalog language");
+        return;
+    }
     if (status == 401 || status == 403) {
         fail(502, "catalog authorization rejected");
         return;
@@ -389,6 +484,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
     }
 
     cJSON* data = cJSON_CreateObject();
+    if (!language.empty()) cJSON_AddStringToObject(data, "language", language.c_str());
     cJSON* items = cJSON_AddArrayToObject(data, "items");
     const cJSON* item = nullptr;
     cJSON_ArrayForEach(item, upstreamItems) {
@@ -414,6 +510,38 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         for (const char* field : {"discNumber", "trackNumber", "trackCount"}) {
             const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
             if (cJSON_IsNumber(value)) cJSON_AddNumberToObject(hit, field, value->valuedouble);
+        }
+        if (metadata) {
+            for (const char* field : {"releaseDate", "composerName", "genreNames", "isrc",
+                                      "contentRating", "recordLabel", "upc", "copyright",
+                                      "isCompilation", "isComplete", "hasLyrics", "artwork",
+                                      "workName", "movementName", "movementNumber",
+                                      "movementCount", "attribution"}) {
+                const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+                if (value) cJSON_AddItemToObject(hit, field, cJSON_Duplicate(value, true));
+            }
+            const cJSON* relationships = cJSON_GetObjectItemCaseSensitive(item, "relationships");
+            for (const char* relation : {"albums", "artists", "composers", "genres"}) {
+                const cJSON* group = cJSON_GetObjectItemCaseSensitive(relationships, relation);
+                const cJSON* entries = cJSON_GetObjectItemCaseSensitive(group, "data");
+                if (!cJSON_IsArray(entries) || cJSON_GetObjectItemCaseSensitive(group, "next")) continue;
+                cJSON* names = cJSON_AddArrayToObject(hit, relation);
+                const cJSON* member = nullptr;
+                cJSON_ArrayForEach(member, entries) {
+                    const cJSON* memberId = cJSON_GetObjectItemCaseSensitive(member, "id");
+                    const cJSON* memberAttrs = cJSON_GetObjectItemCaseSensitive(member, "attributes");
+                    const cJSON* memberName = cJSON_GetObjectItemCaseSensitive(memberAttrs, "name");
+                    cJSON* entry = cJSON_CreateObject();
+                    cJSON_AddItemToArray(names, entry);
+                    if (cJSON_IsString(memberId)) cJSON_AddStringToObject(entry, "id", memberId->valuestring);
+                    if (cJSON_IsString(memberName)) cJSON_AddStringToObject(entry, "name", memberName->valuestring);
+                }
+            }
+            const cJSON* credits = cJSON_GetObjectItemCaseSensitive(relationships, "credits");
+            const cJSON* groups = cJSON_GetObjectItemCaseSensitive(credits, "data");
+            if (cJSON_IsArray(groups)) cJSON_AddItemToObject(hit, "credits", cJSON_Duplicate(groups, true));
+            const cJSON* href = cJSON_GetObjectItemCaseSensitive(item, "href");
+            if (cJSON_IsString(href)) cJSON_AddStringToObject(hit, "href", href->valuestring);
         }
     }
     if (tracks && upstreamNext) {
