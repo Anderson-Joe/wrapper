@@ -349,7 +349,10 @@ static int runQemu(const std::string& qemuBin, const std::string& accel,
 }
 
 int main(int argc, char** argv) {
-    /* Environment variables remain as fallbacks; command-line flags win. */
+    std::string dir = executableDir();
+    if (dir.empty()) dir = ".";
+
+    /* Environment variables remain fallbacks; command-line flags win. */
     g_host = getEnv("LITE_QEMU_HOST", "127.0.0.1");
     g_hostPort = getEnv("HOST_PORT", "12340");
     g_guestPort = getEnv("GUEST_PORT", "12340");
@@ -358,6 +361,18 @@ int main(int argc, char** argv) {
     g_smp = getEnv("SMP", "2");
     g_forcedAccel = getEnv("LITE_QEMU_ACCEL", "");
     g_qemuBin = getEnv("QEMU_BIN", "");
+
+    std::ifstream portFile(dir + "/wrapper-lite-port.txt");
+    if (portFile) {
+        std::string port, extra;
+        if (!(portFile >> port) || portFile >> extra ||
+            port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos ||
+            std::atoi(port.c_str()) < 1 || std::atoi(port.c_str()) > 65535) {
+            std::fprintf(stderr, "[run] wrapper-lite-port.txt must contain one port number (1-65535)\n");
+            return 1;
+        }
+        g_hostPort = port;
+    }
 
     std::vector<std::string> liteArgs;
     for (int i = 1; i < argc; ++i) {
@@ -394,8 +409,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::string dir = executableDir();
-    if (dir.empty()) dir = ".";
     std::string assetDir = dir + "/qemu";
 
     std::string qemuBin = locateQemu(assetDir);

@@ -127,7 +127,7 @@ All responses use:
 | `/webplayback` | GET | `adamId`. Returns the playback URL and available Apple metadata: `xid`, `gapless`, and `comments`. |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
 | `/catalog/search` | GET | `term` and `type` (`songs` or `albums`), with optional `region` (defaults to the session storefront), `limit` (1–25, default 20), and `offset` (0–10000). Returns `region`, `items`, and `hasNext`. Uses the cached developer token internally. |
-| `/catalog/item` | GET | `region`, `type` (`songs` or `albums`), and numeric `id`. Returns the matching catalog item and its metadata. |
+| `/catalog/item` | GET | `region`, `type` (`songs`, `albums`, or `artists`), and numeric `id`. Album requests with `metadata=1` include `editorialNotes` when available. For motion artwork, use `artistMotion=1` with artists or `albumMotion=1` with albums. The response includes the corresponding `artistMotionSupported` or `albumMotionSupported` flag and any variants in `items[].editorialVideo`. |
 | `/catalog/tracks` | GET | `region`, numeric album `id`, and optional `offset` (default 0). Returns up to 25 tracks with disc and track numbers when available, plus a `next` reference when more pages exist. |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
 
@@ -186,6 +186,8 @@ Pass `--device-info <string>` to override the entire string explicitly.
 | `--smp <N>` | `2` | guest CPU count |
 | `--accel <accel>` | auto | force acceleration (`kvm`, `hvf`, `whpx`, `tcg`) |
 | `--qemu-bin <path>` | auto | QEMU binary path |
+
+For a standalone installation, put a single port number in `wrapper-lite-port.txt` next to the launcher. This lets the Windows launcher use that port when opened directly. `--host-port` takes precedence over the file, and the file takes precedence over `HOST_PORT`.
 
 Environment variables (fallbacks; command-line flags take precedence):
 

@@ -413,7 +413,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
     if (id.empty() || id.size() > 20 || id.find_first_not_of("0123456789") != std::string::npos ||
         region.size() != 2 ||
         region.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos ||
-        (type != "songs" && type != "albums") || offset.empty() || offset.size() > 5 ||
+        (type != "songs" && type != "albums" && type != "artists") || offset.empty() || offset.size() > 5 ||
         offset.find_first_not_of("0123456789") != std::string::npos) {
         fail(400, "invalid catalog lookup parameters");
         return;
@@ -438,11 +438,16 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
     std::string path = "/v1/catalog/" + region + "/" + type + "/" + id;
     if (tracks) path += "/tracks?limit=25&offset=" + offset;
     const bool metadata = req.get_param_value("metadata") == "1" && !tracks;
-    if (metadata) {
+    const bool include = metadata && type != "artists";
+    const bool artistMotion = !tracks && type == "artists" && req.get_param_value("artistMotion") == "1";
+    const bool albumMotion = !tracks && type == "albums" && req.get_param_value("albumMotion") == "1";
+    const bool motion = artistMotion || albumMotion;
+    if (include) {
         path += type == "songs" ? "?include=albums,artists,composers,credits,genres" : "?include=artists";
     }
+    if (motion) path += include ? "&extend=editorialVideo" : "?extend=editorialVideo";
     if (!language.empty()) {
-        path += tracks || metadata ? "&l=" : "?l=";
+        path += tracks || include || motion ? "&l=" : "?l=";
         path += language;
     }
 
@@ -484,6 +489,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
     }
 
     cJSON* data = cJSON_CreateObject();
+    if (motion) cJSON_AddBoolToObject(data, artistMotion ? "artistMotionSupported" : "albumMotionSupported", true);
     if (!language.empty()) cJSON_AddStringToObject(data, "language", language.c_str());
     cJSON* items = cJSON_AddArrayToObject(data, "items");
     const cJSON* item = nullptr;
@@ -503,6 +509,25 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         cJSON_AddStringToObject(hit, "id", itemId->valuestring);
         cJSON_AddStringToObject(hit, "type", itemType->valuestring);
         cJSON_AddStringToObject(hit, "name", name->valuestring);
+        const cJSON* video = cJSON_GetObjectItemCaseSensitive(attrs, "editorialVideo");
+        if (motion && cJSON_IsObject(video)) {
+            cJSON* variants = cJSON_AddObjectToObject(hit, "editorialVideo");
+            const std::initializer_list<const char*> artistFields = {
+                "motionArtistSquare1x1", "motionArtistWide16x9", "motionArtistFullscreen16x9"
+            };
+            const std::initializer_list<const char*> albumFields = {"motionDetailSquare", "motionDetailTall"};
+            for (const char* field : artistMotion ? artistFields : albumFields) {
+                const cJSON* entry = cJSON_GetObjectItemCaseSensitive(video, field);
+                if (cJSON_IsObject(entry)) cJSON_AddItemToObject(variants, field, cJSON_Duplicate(entry, true));
+            }
+        }
+        if (type == "artists") {
+            for (const char* field : {"artwork", "editorialNotes", "genreNames", "url"}) {
+                const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+                if (value) cJSON_AddItemToObject(hit, field, cJSON_Duplicate(value, true));
+            }
+            continue;
+        }
         for (const char* field : {"artistName", "albumName"}) {
             const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
             if (cJSON_IsString(value)) cJSON_AddStringToObject(hit, field, value->valuestring);
@@ -519,6 +544,10 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
                                       "movementCount", "attribution"}) {
                 const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
                 if (value) cJSON_AddItemToObject(hit, field, cJSON_Duplicate(value, true));
+            }
+            if (type == "albums") {
+                const cJSON* notes = cJSON_GetObjectItemCaseSensitive(attrs, "editorialNotes");
+                if (cJSON_IsObject(notes)) cJSON_AddItemToObject(hit, "editorialNotes", cJSON_Duplicate(notes, true));
             }
             const cJSON* relationships = cJSON_GetObjectItemCaseSensitive(item, "relationships");
             for (const char* relation : {"albums", "artists", "composers", "genres"}) {
