@@ -292,6 +292,39 @@ static const char* catalog_language_error(int status) {
     return "catalog storefront language lookup failed";
 }
 
+static const cJSON* song_search_album(const cJSON* song, const cJSON* songAttrs) {
+    const cJSON* relationships = cJSON_GetObjectItemCaseSensitive(song, "relationships");
+    const cJSON* albums = cJSON_GetObjectItemCaseSensitive(relationships, "albums");
+    const cJSON* items = cJSON_GetObjectItemCaseSensitive(albums, "data");
+    const int count = cJSON_GetArraySize(items);
+    if (!cJSON_IsArray(items) || count == 0) return nullptr;
+    if (count == 1) {
+        return cJSON_GetArrayItem(items, 0);
+    }
+
+    // 多个关联版本时，只使用与搜索结果的所属专辑名唯一对应的版本。
+    const cJSON* expected = cJSON_GetObjectItemCaseSensitive(songAttrs, "albumName");
+    if (!cJSON_IsString(expected)) return nullptr;
+    const cJSON* match = nullptr;
+    const cJSON* album = nullptr;
+    cJSON_ArrayForEach(album, items) {
+        const cJSON* attrs = cJSON_GetObjectItemCaseSensitive(album, "attributes");
+        const cJSON* name = cJSON_GetObjectItemCaseSensitive(attrs, "name");
+        if (cJSON_IsString(name) && std::string(name->valuestring) == expected->valuestring) {
+            if (match) return nullptr;
+            match = album;
+        }
+    }
+    return match;
+}
+
+static void add_search_track_count(cJSON* hit, const cJSON* attrs, const char* field) {
+    const cJSON* count = cJSON_GetObjectItemCaseSensitive(attrs, "trackCount");
+    if (cJSON_IsNumber(count) && count->valueint >= 0 && count->valuedouble == count->valueint) {
+        cJSON_AddNumberToObject(hit, field, count->valueint);
+    }
+}
+
 static void handle_catalog_search(const httplib::Request& req, httplib::Response& res) {
     const auto fail = [&](int status, const char* message) {
         res.status = status;
@@ -392,9 +425,19 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
             if (cJSON_IsString(value)) cJSON_AddStringToObject(hit, field, value->valuestring);
         }
         if (type == "albums") {
-            const cJSON* count = cJSON_GetObjectItemCaseSensitive(attrs, "trackCount");
-            if (cJSON_IsNumber(count) && count->valueint >= 0 && count->valuedouble == count->valueint) {
-                cJSON_AddNumberToObject(hit, "trackCount", count->valueint);
+            add_search_track_count(hit, attrs, "trackCount");
+        } else if (const cJSON* albumItem = song_search_album(item, attrs)) {
+            const cJSON* albumId = cJSON_GetObjectItemCaseSensitive(albumItem, "id");
+            if (cJSON_IsString(albumId)) cJSON_AddStringToObject(hit, "albumId", albumId->valuestring);
+            const cJSON* album = cJSON_GetObjectItemCaseSensitive(albumItem, "attributes");
+            add_search_track_count(hit, album, "albumTrackCount");
+            const cJSON* releaseDate = cJSON_GetObjectItemCaseSensitive(album, "releaseDate");
+            if (cJSON_IsString(releaseDate)) {
+                cJSON_AddStringToObject(hit, "albumReleaseDate", releaseDate->valuestring);
+            }
+            const cJSON* albumName = cJSON_GetObjectItemCaseSensitive(album, "name");
+            if (cJSON_IsString(albumName) && !cJSON_GetObjectItemCaseSensitive(hit, "albumName")) {
+                cJSON_AddStringToObject(hit, "albumName", albumName->valuestring);
             }
         }
     }
@@ -402,7 +445,12 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
     res.set_content(json_success(data), "application/json");
 }
 
-static void handle_catalog_detail(const httplib::Request& req, httplib::Response& res, bool tracks) {
+enum class CatalogLookup { Item, AlbumTracks, SongMusicVideos };
+
+static void handle_catalog_detail(const httplib::Request& req, httplib::Response& res, CatalogLookup lookup) {
+    const bool tracks = lookup == CatalogLookup::AlbumTracks;
+    const bool relatedVideos = lookup == CatalogLookup::SongMusicVideos;
+    const bool collection = lookup != CatalogLookup::Item;
     const auto fail = [&](int status, const char* message) {
         res.status = status;
         res.set_content(json_error(status, message), "application/json");
@@ -414,12 +462,14 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         return;
     }
     auto region = req.get_param_value("region");
-    const auto type = tracks ? std::string("albums") : req.get_param_value("type");
+    const auto type = tracks ? std::string("albums")
+                    : relatedVideos ? std::string("songs") : req.get_param_value("type");
     const auto offset = req.has_param("offset") ? req.get_param_value("offset") : "0";
     if (id.empty() || id.size() > 20 || id.find_first_not_of("0123456789") != std::string::npos ||
         region.size() != 2 ||
         region.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos ||
-        (type != "songs" && type != "albums" && type != "artists") || offset.empty() || offset.size() > 5 ||
+        (type != "songs" && type != "albums" && type != "artists" && type != "music-videos") ||
+        offset.empty() || offset.size() > 5 ||
         offset.find_first_not_of("0123456789") != std::string::npos) {
         fail(400, "invalid catalog lookup parameters");
         return;
@@ -443,22 +493,32 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
     }
     std::string path = "/v1/catalog/" + region + "/" + type + "/" + id;
     if (tracks) path += "/tracks?limit=25&offset=" + offset;
-    const bool metadata = req.get_param_value("metadata") == "1" && !tracks;
+    if (relatedVideos) {
+        path += "/music-videos";
+        // Apple 的歌曲关联 MV 使用自己的分页大小。
+        if (offset.find_first_not_of('0') != std::string::npos) path += "?offset=" + offset;
+    }
+
+    const bool musicVideo = type == "music-videos" || relatedVideos;
+    const bool metadata = req.get_param_value("metadata") == "1" && !collection;
     const bool include = metadata && type != "artists";
-    const bool artistMotion = !tracks && type == "artists" && req.get_param_value("artistMotion") == "1";
-    const bool albumMotion = !tracks && type == "albums" && req.get_param_value("albumMotion") == "1";
+    const bool artistMotion = !collection && type == "artists" && req.get_param_value("artistMotion") == "1";
+    const bool albumMotion = !collection && type == "albums" && req.get_param_value("albumMotion") == "1";
     const bool motion = artistMotion || albumMotion;
     if (include) {
-        path += type == "songs" ? "?include=albums,artists,composers,credits,genres" : "?include=artists";
+        if (type == "songs") path += "?include=albums,artists,composers,credits,genres";
+        else if (musicVideo) path += "?include=albums,artists,genres,songs";
+        else path += "?include=artists";
     }
     if (motion) path += include ? "&extend=editorialVideo" : "?extend=editorialVideo";
     if (!language.empty()) {
-        path += tracks || include || motion ? "&l=" : "?l=";
+        path += path.find('?') != std::string::npos ? "&l=" : "?l=";
         path += language;
     }
 
     std::string body;
     const long status = AppleApi::getCatalogResponse(path, devToken, body);
+    if (relatedVideos && status == 204) body = "{\"data\":[]}";
     if (status == 400 && !language.empty()) {
         fail(400, "invalid catalog language");
         return;
@@ -475,7 +535,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         fail(429, "catalog rate limit reached");
         return;
     }
-    if (status != 200) {
+    if (status != 200 && !(relatedVideos && status == 204)) {
         fail(502, "catalog request failed");
         return;
     }
@@ -488,7 +548,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         fail(502, "invalid catalog response");
         return;
     }
-    if (!tracks && cJSON_GetArraySize(upstreamItems) == 0) {
+    if (!collection && cJSON_GetArraySize(upstreamItems) == 0) {
         cJSON_Delete(root);
         fail(404, "catalog resource not found");
         return;
@@ -496,6 +556,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
 
     cJSON* data = cJSON_CreateObject();
     if (motion) cJSON_AddBoolToObject(data, artistMotion ? "artistMotionSupported" : "albumMotionSupported", true);
+    if (relatedVideos) cJSON_AddStringToObject(data, "songId", id.c_str());
     if (!language.empty()) cJSON_AddStringToObject(data, "language", language.c_str());
     cJSON* items = cJSON_AddArrayToObject(data, "items");
     const cJSON* item = nullptr;
@@ -504,7 +565,9 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
         const cJSON* itemId = cJSON_GetObjectItemCaseSensitive(item, "id");
         const cJSON* itemType = cJSON_GetObjectItemCaseSensitive(item, "type");
         const cJSON* name = cJSON_GetObjectItemCaseSensitive(attrs, "name");
-        if (!cJSON_IsString(itemId) || !cJSON_IsString(itemType) || !cJSON_IsString(name)) {
+        if (!cJSON_IsString(itemId) || !cJSON_IsString(itemType) || !cJSON_IsString(name) ||
+            (musicVideo && (strcmp(itemType->valuestring, "music-videos") != 0 ||
+                            (!relatedVideos && id != itemId->valuestring)))) {
             cJSON_Delete(root);
             cJSON_Delete(data);
             fail(502, "invalid catalog response");
@@ -542,7 +605,15 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
             const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
             if (cJSON_IsNumber(value)) cJSON_AddNumberToObject(hit, field, value->valuedouble);
         }
-        if (metadata) {
+        if (musicVideo) {
+            for (const char* field : {"releaseDate", "durationInMillis", "isrc", "url", "has4K", "hasHDR",
+                                      "artwork", "genreNames", "contentRating", "editorialNotes", "previews",
+                                      "playParams", "videoSubType", "artistUrl", "workId", "workName"}) {
+                const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+                if (value) cJSON_AddItemToObject(hit, field, cJSON_Duplicate(value, true));
+            }
+        }
+        if (metadata && !musicVideo) {
             for (const char* field : {"releaseDate", "composerName", "genreNames", "isrc",
                                       "contentRating", "recordLabel", "upc", "copyright",
                                       "isCompilation", "isComplete", "hasLyrics", "artwork",
@@ -555,8 +626,12 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
                 const cJSON* notes = cJSON_GetObjectItemCaseSensitive(attrs, "editorialNotes");
                 if (cJSON_IsObject(notes)) cJSON_AddItemToObject(hit, "editorialNotes", cJSON_Duplicate(notes, true));
             }
+        }
+        if (metadata) {
             const cJSON* relationships = cJSON_GetObjectItemCaseSensitive(item, "relationships");
-            for (const char* relation : {"albums", "artists", "composers", "genres"}) {
+            const std::initializer_list<const char*> videoRelations = {"albums", "artists", "genres", "songs"};
+            const std::initializer_list<const char*> otherRelations = {"albums", "artists", "composers", "genres"};
+            for (const char* relation : musicVideo ? videoRelations : otherRelations) {
                 const cJSON* group = cJSON_GetObjectItemCaseSensitive(relationships, relation);
                 const cJSON* entries = cJSON_GetObjectItemCaseSensitive(group, "data");
                 if (!cJSON_IsArray(entries) || cJSON_GetObjectItemCaseSensitive(group, "next")) continue;
@@ -579,7 +654,7 @@ static void handle_catalog_detail(const httplib::Request& req, httplib::Response
             if (cJSON_IsString(href)) cJSON_AddStringToObject(hit, "href", href->valuestring);
         }
     }
-    if (tracks && upstreamNext) {
+    if (collection && upstreamNext) {
         // 客户端只从分页地址读偏移量，请求仍发往固定目录端点。
         cJSON_AddStringToObject(data, "next", upstreamNext->valuestring);
     }
@@ -1050,10 +1125,13 @@ int main(int argc, char* argv[]) {
 
     svr.Get("/catalog/search", handle_catalog_search);
     svr.Get("/catalog/item", [](const httplib::Request& req, httplib::Response& res) {
-        handle_catalog_detail(req, res, false);
+        handle_catalog_detail(req, res, CatalogLookup::Item);
     });
     svr.Get("/catalog/tracks", [](const httplib::Request& req, httplib::Response& res) {
-        handle_catalog_detail(req, res, true);
+        handle_catalog_detail(req, res, CatalogLookup::AlbumTracks);
+    });
+    svr.Get("/catalog/music-videos", [](const httplib::Request& req, httplib::Response& res) {
+        handle_catalog_detail(req, res, CatalogLookup::SongMusicVideos);
     });
     svr.Get("/m3u8", handle_m3u8);
     svr.Get("/key", handle_key);
@@ -1081,8 +1159,8 @@ int main(int argc, char* argv[]) {
 
     svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
         // 保留目录详情接口区分资源不存在和路由不存在的错误正文。
-        const bool catalogNotFound = (req.path == "/catalog/item" || req.path == "/catalog/tracks")
-                                     && !res.body.empty();
+        const bool catalogNotFound = (req.path == "/catalog/item" || req.path == "/catalog/tracks" ||
+                                      req.path == "/catalog/music-videos") && !res.body.empty();
         if (res.status == 404 && !catalogNotFound)
             res.set_content(json_error(404, "not found"), "application/json");
     });

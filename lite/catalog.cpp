@@ -23,6 +23,7 @@ long AppleApi::searchCatalog(const std::string& region, const std::string& term,
     std::string path = "/v1/catalog/" + region + "/search?term=" +
         encode_query(term) + "&types=" + type + "&limit=" + std::to_string(limit) +
         "&offset=" + std::to_string(offset);
+    if (type == "songs") path += "&include%5Bsongs%5D=albums";
     if (!language.empty()) path += "&l=" + encode_query(language);
     return getCatalogResponse(path, devToken, body);
 }
