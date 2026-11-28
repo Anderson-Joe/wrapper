@@ -127,9 +127,11 @@ All responses use:
 | `/webplayback` | GET | `adamId`. Returns the playback URL and available Apple metadata: `xid`, `gapless`, and `comments`. |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
 | `/catalog/search` | GET | `term` and `type` (`songs` or `albums`), with optional `region` (defaults to the session storefront), `limit` (1–25, default 20), and `offset` (0–10000). Returns `region`, `items`, and `hasNext`. Uses the cached developer token internally. |
+| `/catalog/item` | GET | `region`, `type` (`songs` or `albums`), and numeric `id`. Returns the matching catalog item and its metadata. |
+| `/catalog/tracks` | GET | `region`, numeric album `id`, and optional `offset` (default 0). Returns up to 25 tracks with disc and track numbers when available, plus a `next` reference when more pages exist. |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
 
-Catalog search uses the cached developer token and returns an empty list when no results match. It returns HTTP 400 for invalid parameters, 429 for upstream rate limiting, 502 for an upstream request or authorization failure, and 503 when the local catalog session is unavailable.
+Catalog requests use the cached developer token. Search returns an empty list when no results match. Catalog routes return HTTP 400 for invalid parameters, 404 for a missing item, 429 for upstream rate limiting, 502 for an upstream request or authorization failure, and 503 when the local catalog session is unavailable.
 
 ## lite arguments
 

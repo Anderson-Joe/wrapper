@@ -323,6 +323,107 @@ static void handle_catalog_search(const httplib::Request& req, httplib::Response
     res.set_content(json_success(data), "application/json");
 }
 
+static void handle_catalog_detail(const httplib::Request& req, httplib::Response& res, bool tracks) {
+    const auto fail = [&](int status, const char* message) {
+        res.status = status;
+        res.set_content(json_error(status, message), "application/json");
+    };
+    const auto id = req.get_param_value("id");
+    auto region = req.get_param_value("region");
+    const auto type = tracks ? std::string("albums") : req.get_param_value("type");
+    const auto offset = req.has_param("offset") ? req.get_param_value("offset") : "0";
+    if (id.empty() || id.size() > 20 || id.find_first_not_of("0123456789") != std::string::npos ||
+        region.size() != 2 ||
+        region.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos ||
+        (type != "songs" && type != "albums") || offset.empty() || offset.size() > 5 ||
+        offset.find_first_not_of("0123456789") != std::string::npos) {
+        fail(400, "invalid catalog lookup parameters");
+        return;
+    }
+    std::transform(region.begin(), region.end(), region.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    std::string devToken;
+    {
+        std::lock_guard<std::mutex> lock(g_tokens_mutex);
+        devToken = g_tokens.dev_token;
+    }
+    if (devToken.empty()) {
+        fail(503, "catalog session unavailable");
+        return;
+    }
+    std::string path = "/v1/catalog/" + region + "/" + type + "/" + id;
+    if (tracks) path += "/tracks?limit=25&offset=" + offset;
+
+    std::string body;
+    const long status = AppleApi::getCatalogResponse(path, devToken, body);
+    if (status == 401 || status == 403) {
+        fail(502, "catalog authorization rejected");
+        return;
+    }
+    if (status == 404) {
+        fail(404, "catalog resource not found");
+        return;
+    }
+    if (status == 429) {
+        fail(429, "catalog rate limit reached");
+        return;
+    }
+    if (status != 200) {
+        fail(502, "catalog request failed");
+        return;
+    }
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    const cJSON* upstreamItems = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON* upstreamNext = cJSON_GetObjectItemCaseSensitive(root, "next");
+    if (!cJSON_IsArray(upstreamItems) || (upstreamNext && !cJSON_IsString(upstreamNext))) {
+        cJSON_Delete(root);
+        fail(502, "invalid catalog response");
+        return;
+    }
+    if (!tracks && cJSON_GetArraySize(upstreamItems) == 0) {
+        cJSON_Delete(root);
+        fail(404, "catalog resource not found");
+        return;
+    }
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON* items = cJSON_AddArrayToObject(data, "items");
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, upstreamItems) {
+        const cJSON* attrs = cJSON_GetObjectItemCaseSensitive(item, "attributes");
+        const cJSON* itemId = cJSON_GetObjectItemCaseSensitive(item, "id");
+        const cJSON* itemType = cJSON_GetObjectItemCaseSensitive(item, "type");
+        const cJSON* name = cJSON_GetObjectItemCaseSensitive(attrs, "name");
+        if (!cJSON_IsString(itemId) || !cJSON_IsString(itemType) || !cJSON_IsString(name)) {
+            cJSON_Delete(root);
+            cJSON_Delete(data);
+            fail(502, "invalid catalog response");
+            return;
+        }
+        cJSON* hit = cJSON_CreateObject();
+        cJSON_AddItemToArray(items, hit);
+        cJSON_AddStringToObject(hit, "id", itemId->valuestring);
+        cJSON_AddStringToObject(hit, "type", itemType->valuestring);
+        cJSON_AddStringToObject(hit, "name", name->valuestring);
+        for (const char* field : {"artistName", "albumName"}) {
+            const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+            if (cJSON_IsString(value)) cJSON_AddStringToObject(hit, field, value->valuestring);
+        }
+        for (const char* field : {"discNumber", "trackNumber", "trackCount"}) {
+            const cJSON* value = cJSON_GetObjectItemCaseSensitive(attrs, field);
+            if (cJSON_IsNumber(value)) cJSON_AddNumberToObject(hit, field, value->valuedouble);
+        }
+    }
+    if (tracks && upstreamNext) {
+        // 客户端只从分页地址读偏移量，请求仍发往固定目录端点。
+        cJSON_AddStringToObject(data, "next", upstreamNext->valuestring);
+    }
+    cJSON_Delete(root);
+    res.set_content(json_success(data), "application/json");
+}
+
 static void handle_m3u8(const httplib::Request& req, httplib::Response& res) {
     auto adamId = req.get_param_value("adamId");
     if (adamId.empty()) {
@@ -785,6 +886,12 @@ int main(int argc, char* argv[]) {
     });
 
     svr.Get("/catalog/search", handle_catalog_search);
+    svr.Get("/catalog/item", [](const httplib::Request& req, httplib::Response& res) {
+        handle_catalog_detail(req, res, false);
+    });
+    svr.Get("/catalog/tracks", [](const httplib::Request& req, httplib::Response& res) {
+        handle_catalog_detail(req, res, true);
+    });
     svr.Get("/m3u8", handle_m3u8);
     svr.Get("/key", handle_key);
     svr.Get("/lyrics", handle_lyrics);
@@ -809,8 +916,11 @@ int main(int argc, char* argv[]) {
         res.set_content(json_success(data), "application/json");
     });
 
-    svr.set_error_handler([](const httplib::Request&, httplib::Response& res) {
-        if (res.status == 404)
+    svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+        // 保留目录详情接口区分资源不存在和路由不存在的错误正文。
+        const bool catalogNotFound = (req.path == "/catalog/item" || req.path == "/catalog/tracks")
+                                     && !res.body.empty();
+        if (res.status == 404 && !catalogNotFound)
             res.set_content(json_error(404, "not found"), "application/json");
     });
     svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
