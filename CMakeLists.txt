@@ -70,6 +70,7 @@ set(LITE_SOURCE
     lite/playback.cpp
     lite/tokens.cpp
     lite/apple_api.cpp
+    lite/catalog.cpp
 )
 
 add_executable(lite ${LITE_SOURCE})

@@ -126,7 +126,13 @@ All responses use:
 | `/lyrics` | GET | `adamId`, optional `language`, optional `syllable` (`1`=word-timed syllable-lyrics with translations/romanization, `0`=line-timed lyrics converted in-wrapper **and still carrying translations/romanization as whole-line text**), optional `script` (transliteration script, default `en-Latn`) |
 | `/webplayback` | GET | `adamId`. Returns the playback URL and available Apple metadata: `xid`, `gapless`, and `comments`. |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
+| `/catalog/search` | GET | `term` and `type` (`songs` or `albums`), with optional `region` (defaults to the session storefront), `limit` (1–25, default 20), and `offset` (0–10000). Returns `region`, `items`, and `hasNext`. Album hits include `trackCount` when supplied by Apple Music. Song hits can include `albumId`, `albumTrackCount`, and `albumReleaseDate` when the album version can be identified. Uses the cached developer token internally. |
+| `/catalog/item` | GET | `region`, `type` (`songs`, `albums`, `artists`, or `music-videos`), and numeric `id`. Album requests with `metadata=1` include `editorialNotes` when available. For motion artwork, use `artistMotion=1` with artists or `albumMotion=1` with albums. The response includes the corresponding `artistMotionSupported` or `albumMotionSupported` flag and any variants in `items[].editorialVideo`. |
+| `/catalog/music-videos` | GET | `region`, numeric song `id`, optional `language`, and optional `offset` (default 0). Returns `songId`, the related Apple Music videos in `items`, and `next` when more pages exist. An empty `items` array means the catalog returned no related music videos. Use `/catalog/item?type=music-videos&metadata=1` for video relationships and `/webplayback` for a playback manifest. |
+| `/catalog/tracks` | GET | `region`, numeric album `id`, and optional `offset` (default 0). Returns up to 25 tracks with disc and track numbers when available, plus a `next` reference when more pages exist. |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
+
+Catalog requests use the cached developer token. Search returns an empty list when no results match. Catalog routes return HTTP 400 for invalid parameters, 404 for a missing item, 429 for upstream rate limiting, 502 for an upstream request or authorization failure, and 503 when the local catalog session is unavailable.
 
 ## lite arguments
 
@@ -181,6 +187,8 @@ Pass `--device-info <string>` to override the entire string explicitly.
 | `--smp <N>` | `2` | guest CPU count |
 | `--accel <accel>` | auto | force acceleration (`kvm`, `hvf`, `whpx`, `tcg`) |
 | `--qemu-bin <path>` | auto | QEMU binary path |
+
+For a standalone installation, put a single port number in `wrapper-lite-port.txt` next to the launcher. This lets the Windows launcher use that port when opened directly. `--host-port` takes precedence over the file, and the file takes precedence over `HOST_PORT`.
 
 Environment variables (fallbacks; command-line flags take precedence):
 
